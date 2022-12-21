@@ -1,22 +1,24 @@
 #![warn(unused_crate_dependencies)]
-use structopt::StructOpt;
-use git2::{Signature, Repository, Time, Oid};
+use chrono::{DateTime, FixedOffset, Local, NaiveDateTime};
+use git2::{Oid, Repository, Signature, Time};
 use lazy_static::lazy_static;
-use std::rc::Rc;
-use std::collections::{HashSet, HashMap};
 use std::collections::hash_map;
-use chrono::{DateTime, NaiveDateTime, Local, FixedOffset};
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+use structopt::StructOpt;
 
-use ansi_term::Colour::{White, RGB};
 use ansi_term::Colour;
+use ansi_term::Colour::{White, RGB};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("Globset error; {0}")]
     GlobSet(#[from] globset::Error),
+
     #[error("Git error; {0}")]
     Git(#[from] git2::Error),
+
     #[error("Io error; {0}")]
     Io(std::io::Error),
 }
@@ -27,11 +29,11 @@ struct Args {
     git_dir: Option<String>,
 
     /// Alternative git directory to use
-    #[structopt(name = "days", long, short="d", default_value="30")]
+    #[structopt(name = "days", long, short = "d", default_value = "30")]
     days: u64,
 
     /// Reverse the display order
-    #[structopt(name = "reverse", long, short="r")]
+    #[structopt(name = "reverse", long, short = "r")]
     reverse: bool,
 
     #[structopt(name = "author", long)]
@@ -58,25 +60,38 @@ fn sig_matches(sig: &Signature, arg: &Option<String>) -> bool {
 }
 
 fn print_time(time: &Time, index: usize) {
-    let dt = DateTime::<Local>::from_utc(NaiveDateTime::from_timestamp(time.seconds(), 0), FixedOffset::east(0));
+    let dt = DateTime::<Local>::from_utc(
+        NaiveDateTime::from_timestamp_opt(time.seconds(), 0).expect("invalid timstamp"),
+        FixedOffset::east_opt(0).unwrap(),
+    );
 
     print!(
         "{} {}",
-        if index % 2 == 0 { RGB(255, 200, 0) } else { RGB((255 as u16 *3/5) as u8, (200 as u16 *3/5) as u8, 0) }
+        if index % 2 == 0 {
+            RGB(255, 200, 0)
+        } else {
+            RGB((255 as u16 * 3 / 5) as u8, (200 as u16 * 3 / 5) as u8, 0)
+        }
         .paint(format!("{}", dt.format("%Y.%m.%d %H:%M:%S"))),
         White.bold().paint(format!("| ")),
     );
 }
 
-fn print_commit(idx: usize, _repo: &Repository, time: &Time, msg: &String,
+fn print_commit(
+    idx: usize,
+    _repo: &Repository,
+    time: &Time,
+    msg: &String,
     c: &Vec<(&Oid, &HashSet<Rc<String>>)>,
-    highlight: &Option<String>, branches: &Vec<Rc<String>>, colors: &Vec<Colour>)
-{
+    highlight: &Option<String>,
+    branches: &Vec<Rc<String>>,
+    colors: &Vec<Colour>,
+) {
     match highlight {
         Some(highlight) if !msg.contains(highlight) => {
             return;
         }
-        _ => {},
+        _ => {}
     }
 
     let mut contained_in = HashSet::new();
@@ -112,13 +127,29 @@ impl<'a> Printer<'a> {
     fn print_commits(&self) {
         if self.args.reverse {
             for (idx, (timestamp, msg, id_revs)) in self.v.iter().rev().enumerate() {
-                print_commit(idx, &self.repo, &timestamp, &msg, &id_revs,
-                    &self.args.search, &self.branches, &self.colors);
+                print_commit(
+                    idx,
+                    &self.repo,
+                    &timestamp,
+                    &msg,
+                    &id_revs,
+                    &self.args.search,
+                    &self.branches,
+                    &self.colors,
+                );
             }
         } else {
             for (idx, (timestamp, msg, id_revs)) in self.v.iter().enumerate() {
-                print_commit(idx, &self.repo, &timestamp, &msg, &id_revs,
-                    &self.args.search, &self.branches, &self.colors);
+                print_commit(
+                    idx,
+                    &self.repo,
+                    &timestamp,
+                    &msg,
+                    &id_revs,
+                    &self.args.search,
+                    &self.branches,
+                    &self.colors,
+                );
             }
         }
     }
@@ -142,7 +173,10 @@ impl<'a> Printer<'a> {
         for c in 0..i {
             print!("{}", self.colors[c % self.colors.len()].paint(format!("│")));
         }
-        println!("{}", self.colors[i % self.colors.len()].paint(format!("{}", name)));
+        println!(
+            "{}",
+            self.colors[i % self.colors.len()].paint(format!("{}", name))
+        );
     }
 
     fn print_sep(&self) {
@@ -174,7 +208,7 @@ impl<'a> Printer<'a> {
 
 fn main() {
     match main_wrap() {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(e) => {
             eprintln!("{}", e);
             std::process::exit(-1);
@@ -204,9 +238,8 @@ fn main_wrap() -> Result<(), Error> {
     }
 
     lazy_static! {
-        static ref RE_BRANCH: regex::Regex = regex::Regex::new(
-            "^refs/remotes/origin/(.+)$"
-        ).unwrap();
+        static ref RE_BRANCH: regex::Regex =
+            regex::Regex::new("^refs/remotes/origin/(.+)$").unwrap();
     }
 
     // Which commits OIDs in which barnches
@@ -245,8 +278,8 @@ fn main_wrap() -> Result<(), Error> {
 
             if let Ok(commit) = repo.find_commit(oid) {
                 let time = commit.committer().when();
-                let time = std::time::SystemTime::UNIX_EPOCH +
-                    std::time::Duration::from_secs(time.seconds() as u64);
+                let time = std::time::SystemTime::UNIX_EPOCH
+                    + std::time::Duration::from_secs(time.seconds() as u64);
                 if time.elapsed().unwrap() > ref_max_age {
                     continue;
                 }
@@ -258,8 +291,8 @@ fn main_wrap() -> Result<(), Error> {
             let callback = |cb| {
                 if let Ok(commit) = repo.find_commit(cb) {
                     let time = commit.committer().when();
-                    let time = std::time::SystemTime::UNIX_EPOCH +
-                        std::time::Duration::from_secs(time.seconds() as u64);
+                    let time = std::time::SystemTime::UNIX_EPOCH
+                        + std::time::Duration::from_secs(time.seconds() as u64);
                     if time.elapsed().unwrap() > commit_max_age {
                         return true;
                     }
@@ -294,17 +327,15 @@ fn main_wrap() -> Result<(), Error> {
         }
 
         let time = commit.committer().when();
-        let time = std::time::SystemTime::UNIX_EPOCH +
-            std::time::Duration::from_secs(time.seconds() as u64);
+        let time = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs(time.seconds() as u64);
         if time.elapsed().unwrap() > commit_max_age {
             continue;
         }
 
         for msg in String::from_utf8_lossy(commit.message_bytes()).lines() {
             let item = match msg_map.entry(String::from(msg)) {
-                hash_map::Entry::Vacant(v) => {
-                    v.insert((committer.when(), Vec::new()))
-                },
+                hash_map::Entry::Vacant(v) => v.insert((committer.when(), Vec::new())),
                 hash_map::Entry::Occupied(o) => o.into_mut(),
             };
             item.1.push((id, revs));
@@ -331,7 +362,7 @@ fn main_wrap() -> Result<(), Error> {
         branches.push((found_branches.get(&*branch).map(|x| *x), branch));
     }
     branches.sort();
-    let branches : Vec<_> = branches.into_iter().map(|x| x.1).collect();
+    let branches: Vec<_> = branches.into_iter().map(|x| x.1).collect();
 
     let mut colors = vec![];
     let m = 2;
@@ -340,7 +371,7 @@ fn main_wrap() -> Result<(), Error> {
         for g in 0..=m {
             for b in 0..=m {
                 let t = 255 - n;
-                colors.push(RGB(n + (t*r)/m, n + (t*g)/m, n + (t*b)/m));
+                colors.push(RGB(n + (t * r) / m, n + (t * g) / m, n + (t * b) / m));
             }
         }
     }
@@ -351,7 +382,8 @@ fn main_wrap() -> Result<(), Error> {
         colors,
         branches,
         v,
-    }.print()?;
+    }
+    .print()?;
 
     Ok(())
 }
