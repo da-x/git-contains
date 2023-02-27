@@ -224,11 +224,18 @@ fn main_wrap() -> Result<(), Error> {
     let commit_max_age = std::time::Duration::from_secs(86400 * args.days);
     let mut author = args.author.clone();
 
+    let config = repo.config()?;
     if author.is_none() {
-        let config = repo.config()?;
         let name = config.get_entry("user.name")?;
         let name = name.value();
         author = name.map(|x| x.to_owned());
+    }
+
+    let mut refscript = None;
+    if author.is_none() {
+        if let Ok(entry) = config.get_entry("contains.refscript") {
+            refscript = entry.value();
+        }
     }
 
     let mut patterns = vec![];
@@ -246,70 +253,71 @@ fn main_wrap() -> Result<(), Error> {
     let mut mapoid_to_branches = HashMap::new();
     let mut found_branches = HashMap::new();
 
+    let mut branches = vec![];
     for refe in repo.references()? {
         if let Some(refname) = refe?.name() {
-            let refname = &refname;
-
             let st = if let Some(caps) = RE_BRANCH.captures(&refname) {
-                caps.get(1).unwrap().as_str()
+                caps.get(1).unwrap().as_str().to_owned()
             } else {
                 continue;
             };
-
-            let mut matched = None;
-            for (idx, pattern) in patterns.iter() {
-                if pattern.is_match(&st) {
-                    matched = Some(idx);
-                    break;
-                }
-            }
-
-            let idx = if let Some(idx) = matched {
-                idx
-            } else {
-                continue;
-            };
-
-            found_branches.insert(st.to_owned().clone(), idx);
-
             let revspec = repo.revparse(&refname)?;
-            let name = Rc::new(format!("{}", st));
-            let oid = revspec.from().unwrap().id();
+            branches.push((refname.to_owned(), revspec.from().unwrap().id(), st));
+        }
+    }
 
-            if let Ok(commit) = repo.find_commit(oid) {
+    for (_, oid, st) in branches {
+        let mut matched = None;
+        for (idx, pattern) in patterns.iter() {
+            if pattern.is_match(&st) {
+                matched = Some(idx);
+                break;
+            }
+        }
+
+        let idx = if let Some(idx) = matched {
+            idx
+        } else {
+            continue;
+        };
+
+        found_branches.insert(st.to_owned().clone(), idx);
+
+        let name = Rc::new(format!("{}", st));
+
+        if let Ok(commit) = repo.find_commit(oid) {
+            let time = commit.committer().when();
+            let time = std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(time.seconds() as u64);
+            if time.elapsed().unwrap() > ref_max_age {
+                continue;
+            }
+        }
+
+        let mut revwalk = repo.revwalk()?;
+        revwalk.push(oid)?;
+
+        let callback = |cb| {
+            if let Ok(commit) = repo.find_commit(cb) {
                 let time = commit.committer().when();
                 let time = std::time::SystemTime::UNIX_EPOCH
                     + std::time::Duration::from_secs(time.seconds() as u64);
-                if time.elapsed().unwrap() > ref_max_age {
-                    continue;
+                if time.elapsed().unwrap() > commit_max_age {
+                    return true;
                 }
             }
+            false
+        };
+        let revwalk = revwalk.with_hide_callback(&callback)?;
 
-            let mut revwalk = repo.revwalk()?;
-            revwalk.push(oid)?;
-
-            let callback = |cb| {
-                if let Ok(commit) = repo.find_commit(cb) {
-                    let time = commit.committer().when();
-                    let time = std::time::SystemTime::UNIX_EPOCH
-                        + std::time::Duration::from_secs(time.seconds() as u64);
-                    if time.elapsed().unwrap() > commit_max_age {
-                        return true;
-                    }
-                }
-                false
+        for commit in revwalk {
+            let commit = commit?;
+            let item = match mapoid_to_branches.entry(commit) {
+                hash_map::Entry::Vacant(v) => v.insert(HashSet::new()),
+                hash_map::Entry::Occupied(o) => o.into_mut(),
             };
-            let revwalk = revwalk.with_hide_callback(&callback)?;
 
-            for commit in revwalk {
-                let commit = commit?;
-                let item = match mapoid_to_branches.entry(commit) {
-                    hash_map::Entry::Vacant(v) => v.insert(HashSet::new()),
-                    hash_map::Entry::Occupied(o) => o.into_mut(),
-                };
-
-                item.insert(name.clone());
-            }
+            item.insert(name.clone());
         }
     }
 
