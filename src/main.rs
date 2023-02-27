@@ -3,8 +3,8 @@ use chrono::{DateTime, FixedOffset, Local, NaiveDateTime};
 use git2::{Oid, Repository, Signature, Time};
 use globset::GlobMatcher;
 use lazy_static::lazy_static;
-use std::collections::hash_map;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, btree_map};
+use std::collections::HashSet;
 use std::rc::Rc;
 use structopt::StructOpt;
 
@@ -250,8 +250,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Which commits OIDs in which barnches
-    let mut mapoid_to_branches = HashMap::new();
-    let mut found_branches = HashMap::new();
+    let mut mapoid_to_branches = BTreeMap::new();
+    let mut found_branches = BTreeMap::new();
 
     let mut branches = vec![];
     for refe in repo.references()? {
@@ -346,8 +346,8 @@ fn main() -> anyhow::Result<()> {
         for commit in revwalk {
             let commit = commit?;
             let item = match mapoid_to_branches.entry(commit) {
-                hash_map::Entry::Vacant(v) => v.insert(HashSet::new()),
-                hash_map::Entry::Occupied(o) => o.into_mut(),
+                btree_map::Entry::Vacant(v) => v.insert(HashSet::new()),
+                btree_map::Entry::Occupied(o) => o.into_mut(),
             };
 
             item.insert(name.clone());
@@ -355,7 +355,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Which commit messages map to what OIDs, skipping merges
-    let mut msg_map = HashMap::new();
+    let mut msg_map = BTreeMap::new();
     for (id, revs) in &mapoid_to_branches {
         let commit = repo.find_commit(*id)?;
         if commit.parents().len() > 1 {
@@ -376,8 +376,8 @@ fn main() -> anyhow::Result<()> {
 
         for msg in String::from_utf8_lossy(commit.message_bytes()).lines() {
             let item = match msg_map.entry(String::from(msg)) {
-                hash_map::Entry::Vacant(v) => v.insert((committer.when(), Vec::new())),
-                hash_map::Entry::Occupied(o) => o.into_mut(),
+                btree_map::Entry::Vacant(v) => v.insert((committer.when(), Vec::new())),
+                btree_map::Entry::Occupied(o) => o.into_mut(),
             };
             item.1.push((id, revs));
             break;
