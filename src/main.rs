@@ -246,9 +246,9 @@ fn main_wrap() -> Result<(), Error> {
     let mut mapoid_to_branches = HashMap::new();
     let mut found_branches = HashMap::new();
 
-    for ref mut refe in repo.references() {
-        for refname in refe.names() {
-            let refname = &refname?;
+    for refe in repo.references()? {
+        if let Some(refname) = refe?.name() {
+            let refname = &refname;
 
             let st = if let Some(caps) = RE_BRANCH.captures(&refname) {
                 caps.get(1).unwrap().as_str()
