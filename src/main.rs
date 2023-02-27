@@ -1,6 +1,7 @@
 #![warn(unused_crate_dependencies)]
 use chrono::{DateTime, FixedOffset, Local, NaiveDateTime};
 use git2::{Oid, Repository, Signature, Time};
+use globset::GlobMatcher;
 use lazy_static::lazy_static;
 use std::collections::hash_map;
 use std::collections::{HashMap, HashSet};
@@ -19,7 +20,7 @@ pub enum Error {
     #[error("Git error; {0}")]
     Git(#[from] git2::Error),
 
-    #[error("Io error; {0}")]
+    #[error("Io error: {0}")]
     Io(std::io::Error),
 }
 
@@ -206,17 +207,7 @@ impl<'a> Printer<'a> {
     }
 }
 
-fn main() {
-    match main_wrap() {
-        Ok(()) => {}
-        Err(e) => {
-            eprintln!("{}", e);
-            std::process::exit(-1);
-        }
-    }
-}
-
-fn main_wrap() -> Result<(), Error> {
+fn main() -> anyhow::Result<()> {
     let args = Args::from_args();
     let path = args.git_dir.as_ref().map(|s| &s[..]).unwrap_or(".");
     let repo = Repository::open(path)?;
@@ -232,16 +223,25 @@ fn main_wrap() -> Result<(), Error> {
     }
 
     let mut refscript = None;
-    if author.is_none() {
-        if let Ok(entry) = config.get_entry("contains.refscript") {
-            refscript = entry.value();
-        }
+    if let Ok(entry) = config.get_entry("contains.refscript") {
+        refscript = entry.value().map(|x| x.to_owned());
     }
 
     let mut patterns = vec![];
 
+    enum BranchKind {
+        Glob(GlobMatcher),
+        RefScript(String),
+    }
+
     for (idx, glob) in args.branches.iter().enumerate() {
-        patterns.push((idx, globset::Glob::new(&glob)?.compile_matcher()));
+        let item = if glob.contains(":") {
+            BranchKind::RefScript(glob.clone())
+        } else {
+            BranchKind::Glob(globset::Glob::new(&glob)?.compile_matcher())
+        };
+
+        patterns.push((idx, item));
     }
 
     lazy_static! {
@@ -262,29 +262,62 @@ fn main_wrap() -> Result<(), Error> {
                 continue;
             };
             let revspec = repo.revparse(&refname)?;
-            branches.push((refname.to_owned(), revspec.from().unwrap().id(), st));
+            let mut matched = None;
+            for (idx, pattern) in patterns.iter() {
+                match pattern {
+                    BranchKind::Glob(glob) => {
+                        if glob.is_match(&st) {
+                            matched = Some(idx);
+                            break;
+                        }
+                    },
+                    BranchKind::RefScript(_) => {
+                    },
+                }
+            }
+
+            let idx = if let Some(idx) = matched {
+                idx
+            } else {
+                continue;
+            };
+
+            found_branches.insert(st.to_owned().clone(), idx);
+
+            let name = Rc::new(format!("{}", st));
+            branches.push((name.to_owned(), revspec.from().unwrap().id()));
         }
     }
 
-    for (_, oid, st) in branches {
-        let mut matched = None;
+    if let Some(refscript) = refscript {
         for (idx, pattern) in patterns.iter() {
-            if pattern.is_match(&st) {
-                matched = Some(idx);
-                break;
+            match pattern {
+                BranchKind::Glob(_) => {},
+                BranchKind::RefScript(input) => {
+                    let refscript = if let Ok(home) = std::env::var("HOME") {
+                        refscript.replace("${HOME}", home.as_str())
+                    } else {
+                        refscript.clone()
+                    };
+                    let output = String::from_utf8(std::process::Command::new(&refscript)
+                        .arg(input).output()?.stdout);
+                    let output = output?;
+                    let lines: Vec<_> = output.lines().collect();
+                    if lines.len() >= 2 {
+                        let name = lines[0].clone();
+                        let revspec = repo.revparse(&lines[1])?;
+                        let st = name.clone();
+                        let oid = revspec.from().unwrap().id();
+
+                        found_branches.insert(st.to_owned().clone(), idx);
+                        branches.push((Rc::new(name.to_owned()), oid));
+                    }
+                },
             }
         }
+    }
 
-        let idx = if let Some(idx) = matched {
-            idx
-        } else {
-            continue;
-        };
-
-        found_branches.insert(st.to_owned().clone(), idx);
-
-        let name = Rc::new(format!("{}", st));
-
+    for (name, oid) in branches {
         if let Ok(commit) = repo.find_commit(oid) {
             let time = commit.committer().when();
             let time = std::time::SystemTime::UNIX_EPOCH
