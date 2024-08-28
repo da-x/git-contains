@@ -5,6 +5,7 @@ use globset::GlobMatcher;
 use lazy_static::lazy_static;
 use std::collections::{BTreeMap, btree_map};
 use std::collections::HashSet;
+use std::process::{Command, Stdio};
 use std::rc::Rc;
 use structopt::StructOpt;
 
@@ -48,6 +49,10 @@ struct Args {
     /// Highlight certain commits containing given text
     #[structopt(name = "search", long)]
     search: Option<String>,
+
+    /// Show all the variants of commits having the same commit subject line
+    #[structopt(name = "variants", long, short = "v")]
+    variants: bool,
 }
 
 fn sig_matches(sig: &Signature, arg: &Option<String>) -> bool {
@@ -83,10 +88,11 @@ fn print_commit(
     _repo: &Repository,
     time: &Time,
     msg: &String,
-    c: &Vec<(&Oid, &HashSet<Rc<String>>)>,
+    id_revs: &Vec<(&Oid, &HashSet<Rc<String>>)>,
     highlight: &Option<String>,
     branches: &Vec<Rc<String>>,
     colors: &Vec<Colour>,
+    variants: bool,
 ) {
     match highlight {
         Some(highlight) if !msg.contains(highlight) => {
@@ -96,24 +102,53 @@ fn print_commit(
     }
 
     let mut contained_in = HashSet::new();
-    for (_oid, c_revs) in c {
+    for (_, c_revs) in id_revs {
         contained_in = contained_in.union(c_revs).cloned().collect();
     }
 
-    print_time(&time, idx);
+    for (oid, c_revs) in id_revs {
+        print_time(&time, idx);
 
-    for (i, item) in branches.iter().enumerate() {
-        if contained_in.contains(item) {
-            print!("{}", colors[i % colors.len()].paint(format!("x")));
-        } else {
-            print!("{}", colors[i % colors.len()].paint(format!("┊")));
+        let diff_id = String::from_utf8(
+            Command::new("sh")
+            .arg("-c")
+            .arg(&format!("git show {oid} --format= | cat | sed 's/^@@.*/@@/g' | sed 's/^index.*//' | sha1sum -"))
+            .stdout(Stdio::piped())
+            .output()
+            .expect("failed executing 'git show'").stdout)
+            .expect("utf-8 conversion");
+
+        for (i, item) in branches.iter().enumerate() {
+            let revs = if variants {
+                c_revs
+            } else {
+                &contained_in
+            };
+
+            if revs.contains(item) {
+                print!("{}", colors[i % colors.len()].paint(format!("x")));
+            } else {
+                print!("{}", colors[i % colors.len()].paint(format!("┊")));
+            }
+        }
+
+        print!(" ");
+        print!("{}", &oid.to_string()[..12]);
+        if variants {
+            if id_revs.len() > 1 {
+                print!(" {}", RGB(100, 100, 100).paint(&diff_id[..8]));
+            } else {
+                print!(" {}", "        ");
+            }
+        }
+        print!(" {}", White.bold().paint(msg));
+
+        println!();
+
+        if !variants {
+            break;
         }
     }
-
-    print!(" ");
-    print!(" {}", msg);
-
-    println!();
 }
 
 struct Printer<'a> {
@@ -137,6 +172,7 @@ impl<'a> Printer<'a> {
                     &self.args.search,
                     &self.branches,
                     &self.colors,
+                    self.args.variants,
                 );
             }
         } else {
@@ -150,6 +186,7 @@ impl<'a> Printer<'a> {
                     &self.args.search,
                     &self.branches,
                     &self.colors,
+                    self.args.variants,
                 );
             }
         }
@@ -304,9 +341,9 @@ fn main() -> anyhow::Result<()> {
                     let output = output?;
                     let lines: Vec<_> = output.lines().collect();
                     if lines.len() >= 2 {
-                        let name = lines[0].clone();
+                        let name = lines[0];
                         let revspec = repo.revparse(&lines[1])?;
-                        let st = name.clone();
+                        let st = name;
                         let oid = revspec.from().unwrap().id();
 
                         found_branches.insert(st.to_owned().clone(), idx);
