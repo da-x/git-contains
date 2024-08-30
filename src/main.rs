@@ -30,7 +30,7 @@ struct Args {
     /// Alternative git directory to use
     git_dir: Option<String>,
 
-    /// Alternative git directory to use
+    /// Don't show commits older than this
     #[structopt(name = "days", long, short = "d", default_value = "30")]
     days: u64,
 
@@ -39,11 +39,11 @@ struct Args {
     reverse: bool,
 
     #[structopt(name = "author", long)]
-    /// Author to sort by
+    /// Author to sort by, defaults to current user name
     author: Option<String>,
 
     #[structopt(name = "branch", long)]
-    /// Branches to show
+    /// Branches to show, or `<refscript>:<param>` triggers
     branches: Vec<String>,
 
     /// Highlight certain commits containing given text

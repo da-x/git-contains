@@ -50,13 +50,14 @@ FLAGS:
     -V, --version     Prints version information
 
 OPTIONS:
-        --author <author>       Author to sort by
-        --branch <branch>...    Branches to show
-    -d, --days <days>           Alternative git directory to use [default: 30]
+        --author <author>       Author to sort by, defaults to current user name
+        --branch <branch>...    Branches to show, or `<refscript>:<param>` triggers
+    -d, --days <days>           Don't show commits older than this [default: 30]
         --search <search>       Highlight certain commits containing given text
 
 ARGS:
     <git-dir>    Alternative git directory to use
+
 ```
 
 
