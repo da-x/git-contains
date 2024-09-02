@@ -46,7 +46,7 @@ struct Args {
     /// Branches to show, or `<refscript>:<param>` triggers
     branches: Vec<String>,
 
-    /// Highlight certain commits containing given text
+    /// Only show commits having this text in commit message
     #[structopt(name = "search", long)]
     search: Option<String>,
 
@@ -264,21 +264,37 @@ fn main() -> anyhow::Result<()> {
         refscript = entry.value().map(|x| x.to_owned());
     }
 
-    let mut patterns = vec![];
+    let mut branch_infos = vec![];
 
     enum BranchKind {
         Glob(GlobMatcher),
         RefScript(String),
     }
 
+    struct BranchInfo {
+        show_if_empty: bool,
+        kind: BranchKind,
+    }
+
     for (idx, glob) in args.branches.iter().enumerate() {
-        let item = if glob.contains(":") {
-            BranchKind::RefScript(glob.clone())
+        let mut show_if_empty = false;
+        let glob = if glob.starts_with("!") {
+            show_if_empty = true;
+            &glob[1..]
+        } else {
+            glob
+        };
+        let kind = if glob.contains(":") {
+            BranchKind::RefScript(glob.to_owned())
         } else {
             BranchKind::Glob(globset::Glob::new(&glob)?.compile_matcher())
         };
+        let item = BranchInfo {
+            show_if_empty,
+            kind,
+        };
 
-        patterns.push((idx, item));
+        branch_infos.push((idx, item));
     }
 
     lazy_static! {
@@ -286,7 +302,7 @@ fn main() -> anyhow::Result<()> {
             regex::Regex::new("^refs/remotes/origin/(.+)$").unwrap();
     }
 
-    // Which commits OIDs in which barnches
+    // Which commits OIDs in which branches
     let mut mapoid_to_branches = BTreeMap::new();
     let mut found_branches = BTreeMap::new();
 
@@ -300,11 +316,14 @@ fn main() -> anyhow::Result<()> {
             };
             let revspec = repo.revparse(&refname)?;
             let mut matched = None;
-            for (idx, pattern) in patterns.iter() {
-                match pattern {
+            let mut show_if_empty = false;
+
+            for (idx, branch_info) in branch_infos.iter() {
+                match &branch_info.kind {
                     BranchKind::Glob(glob) => {
                         if glob.is_match(&st) {
                             matched = Some(idx);
+                            show_if_empty = branch_info.show_if_empty;
                             break;
                         }
                     },
@@ -319,7 +338,7 @@ fn main() -> anyhow::Result<()> {
                 continue;
             };
 
-            found_branches.insert(st.to_owned().clone(), idx);
+            found_branches.insert(st.to_owned().clone(), (idx, show_if_empty));
 
             let name = Rc::new(format!("{}", st));
             branches.push((name.to_owned(), revspec.from().unwrap().id()));
@@ -327,8 +346,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Some(refscript) = refscript {
-        for (idx, pattern) in patterns.iter() {
-            match pattern {
+        for (idx, branch_info) in branch_infos.iter() {
+            match &branch_info.kind {
                 BranchKind::Glob(_) => {},
                 BranchKind::RefScript(input) => {
                     let refscript = if let Ok(home) = std::env::var("HOME") {
@@ -346,7 +365,7 @@ fn main() -> anyhow::Result<()> {
                         let st = name;
                         let oid = revspec.from().unwrap().id();
 
-                        found_branches.insert(st.to_owned().clone(), idx);
+                        found_branches.insert(st.to_owned().clone(), (idx, branch_info.show_if_empty));
                         branches.push((Rc::new(name.to_owned()), oid));
                     }
                 },
@@ -438,6 +457,11 @@ fn main() -> anyhow::Result<()> {
     let mut branches = vec![];
     for branch in unsorted_branches.into_iter() {
         branches.push((found_branches.get(&*branch).map(|x| *x), branch));
+    }
+    for (name, (_, show_if_empty)) in found_branches.iter() {
+        if *show_if_empty {
+            branches.push((None, Rc::new(name.to_owned())));
+        }
     }
     branches.sort();
     let branches: Vec<_> = branches.into_iter().map(|x| x.1).collect();
