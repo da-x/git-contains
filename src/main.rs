@@ -1,4 +1,5 @@
 #![warn(unused_crate_dependencies)]
+use anyhow::Context;
 use chrono::{DateTime, FixedOffset, Local, NaiveDateTime};
 use git2::{Oid, Repository, Signature, Time};
 use globset::GlobMatcher;
@@ -247,14 +248,14 @@ impl<'a> Printer<'a> {
 fn main() -> anyhow::Result<()> {
     let args = Args::from_args();
     let path = args.git_dir.as_ref().map(|s| &s[..]).unwrap_or(".");
-    let repo = Repository::open(path)?;
+    let repo = Repository::open(path).context("error opening repository")?;
     let ref_max_age = std::time::Duration::from_secs(86400 * args.days);
     let commit_max_age = std::time::Duration::from_secs(86400 * args.days);
     let mut author = args.author.clone();
 
-    let config = repo.config()?;
+    let config = repo.config().context("error reading repo configuration")?;
     if author.is_none() {
-        let name = config.get_entry("user.name")?;
+        let name = config.get_entry("user.name").context("error reading user.name git config")?;
         let name = name.value();
         author = name.map(|x| x.to_owned());
     }
@@ -287,7 +288,8 @@ fn main() -> anyhow::Result<()> {
         let kind = if glob.contains(":") {
             BranchKind::RefScript(glob.to_owned())
         } else {
-            BranchKind::Glob(globset::Glob::new(&glob)?.compile_matcher())
+            BranchKind::Glob(globset::Glob::new(&glob)
+                .with_context(|| format!("error parsing glob pattern {}", glob))?.compile_matcher())
         };
         let item = BranchInfo {
             show_if_empty,
@@ -307,14 +309,15 @@ fn main() -> anyhow::Result<()> {
     let mut found_branches = BTreeMap::new();
 
     let mut branches = vec![];
-    for refe in repo.references()? {
-        if let Some(refname) = refe?.name() {
+    for refe in repo.references().context("no references")? {
+        if let Some(refname) = refe.context("error parsing ref")?.name() {
             let st = if let Some(caps) = RE_BRANCH.captures(&refname) {
                 caps.get(1).unwrap().as_str().to_owned()
             } else {
                 continue;
             };
-            let revspec = repo.revparse(&refname)?;
+            let revspec = repo.revparse(&refname)
+                .with_context(|| format!("rev parse error: {}", refname))?;
             let mut matched = None;
             let mut show_if_empty = false;
 
@@ -357,11 +360,13 @@ fn main() -> anyhow::Result<()> {
                     };
                     let output = String::from_utf8(std::process::Command::new(&refscript)
                         .arg(input).output()?.stdout);
-                    let output = output?;
+                    let output = output.with_context(|| format!("output error for refscript: {}", refscript))?;
                     let lines: Vec<_> = output.lines().collect();
                     if lines.len() >= 2 {
                         let name = lines[0];
-                        let revspec = repo.revparse(&lines[1])?;
+                        let inp = lines[1];
+                        let revspec = repo.revparse(&inp)
+                            .with_context(|| format!("rev parse error for refscript output {:?}, full output {:?}", inp, output))?;
                         let st = name;
                         let oid = revspec.from().unwrap().id();
 
@@ -397,10 +402,10 @@ fn main() -> anyhow::Result<()> {
             }
             false
         };
-        let revwalk = revwalk.with_hide_callback(&callback)?;
+        let revwalk = revwalk.with_hide_callback(&callback).context("with_hide_callback failed")?;
 
         for commit in revwalk {
-            let commit = commit?;
+            let commit = commit.context("no commit in revwalk")?;
             let item = match mapoid_to_branches.entry(commit) {
                 btree_map::Entry::Vacant(v) => v.insert(HashSet::new()),
                 btree_map::Entry::Occupied(o) => o.into_mut(),
