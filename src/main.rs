@@ -4,7 +4,7 @@ use chrono::{DateTime, FixedOffset, Local, NaiveDateTime};
 use git2::{Oid, Repository, Signature, Time};
 use globset::GlobMatcher;
 use lazy_static::lazy_static;
-use std::collections::{BTreeMap, btree_map};
+use std::collections::{btree_map, BTreeMap, HashMap};
 use std::collections::HashSet;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
@@ -90,6 +90,7 @@ fn print_commit(
     time: &Time,
     msg: &String,
     id_revs: &Vec<(&Oid, &HashSet<Rc<String>>)>,
+    oid_to_diff_id: &HashMap<&Oid, String>,
     highlight: &Option<String>,
     branches: &Vec<Rc<String>>,
     colors: &Vec<Colour>,
@@ -110,14 +111,7 @@ fn print_commit(
     for (oid, c_revs) in id_revs {
         print_time(&time, idx);
 
-        let diff_id = String::from_utf8(
-            Command::new("sh")
-            .arg("-c")
-            .arg(&format!("git show {oid} --format= | cat | sed 's/^@@.*/@@/g' | sed 's/^index.*//' | sha1sum -"))
-            .stdout(Stdio::piped())
-            .output()
-            .expect("failed executing 'git show'").stdout)
-            .expect("utf-8 conversion");
+        let diff_id = oid_to_diff_id.get(oid).map(|x| x.as_str()).unwrap_or("");
 
         for (i, item) in branches.iter().enumerate() {
             let revs = if variants {
@@ -157,6 +151,7 @@ struct Printer<'a> {
     repo: git2::Repository,
     colors: Vec<Colour>,
     branches: Vec<Rc<String>>,
+    oid_to_diff_id: HashMap<&'a Oid, String>,
     v: Vec<(Time, String, Vec<(&'a Oid, &'a HashSet<Rc<String>>)>)>,
 }
 
@@ -170,6 +165,7 @@ impl<'a> Printer<'a> {
                     &timestamp,
                     &msg,
                     &id_revs,
+                    &self.oid_to_diff_id,
                     &self.args.search,
                     &self.branches,
                     &self.colors,
@@ -184,6 +180,7 @@ impl<'a> Printer<'a> {
                     &timestamp,
                     &msg,
                     &id_revs,
+                    &self.oid_to_diff_id,
                     &self.args.search,
                     &self.branches,
                     &self.colors,
@@ -453,9 +450,21 @@ fn main() -> anyhow::Result<()> {
     v.sort_by(|y, x| y.0.cmp(&x.0));
 
     let mut unsorted_branches = HashSet::new();
+    let mut oid_to_diff_id = HashMap::new();
     for (_, _, id_revs) in &v {
-        for (_oid, c_revs) in id_revs {
+        for (oid, c_revs) in id_revs {
             unsorted_branches = unsorted_branches.union(c_revs).cloned().collect();
+
+            let diff_id = String::from_utf8(
+                Command::new("sh")
+                .arg("-c")
+                .arg(&format!("git show {oid} --format= | cat | sed 's/^@@.*/@@/g' | sed 's/^index.*//' | sha1sum -"))
+                .stdout(Stdio::piped())
+                .output()
+                .expect("failed executing 'git show'").stdout)
+                .expect("utf-8 conversion");
+
+            oid_to_diff_id.insert(*oid, diff_id);
         }
     }
 
@@ -488,6 +497,7 @@ fn main() -> anyhow::Result<()> {
         repo,
         colors,
         branches,
+        oid_to_diff_id,
         v,
     }
     .print()?;
