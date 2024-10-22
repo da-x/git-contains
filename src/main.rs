@@ -6,6 +6,7 @@ use globset::GlobMatcher;
 use lazy_static::lazy_static;
 use std::collections::{btree_map, BTreeMap, HashMap};
 use std::collections::HashSet;
+use std::io::Write;
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 use structopt::StructOpt;
@@ -23,7 +24,7 @@ pub enum Error {
     Git(#[from] git2::Error),
 
     #[error("Io error: {0}")]
-    Io(std::io::Error),
+    Io(#[from] std::io::Error),
 }
 
 #[derive(StructOpt, Clone)]
@@ -85,6 +86,7 @@ fn print_time(time: &Time, index: usize) {
 }
 
 fn print_commit(
+    w: &mut impl Write,
     idx: usize,
     _repo: &Repository,
     time: &Time,
@@ -95,10 +97,10 @@ fn print_commit(
     branches: &Vec<Rc<String>>,
     colors: &Vec<Colour>,
     variants: bool,
-) {
+) -> std::io::Result<()> {
     match highlight {
         Some(highlight) if !msg.contains(highlight) => {
-            return;
+            return Ok(());
         }
         _ => {}
     }
@@ -121,29 +123,31 @@ fn print_commit(
             };
 
             if revs.contains(item) {
-                print!("{}", colors[i % colors.len()].paint(format!("x")));
+                write!(w, "{}", colors[i % colors.len()].paint(format!("x")))?;
             } else {
-                print!("{}", colors[i % colors.len()].paint(format!("┊")));
+                write!(w, "{}", colors[i % colors.len()].paint(format!("┊")))?;
             }
         }
 
-        print!(" ");
-        print!("{}", &oid.to_string()[..12]);
+        write!(w, " ")?;
+        write!(w, "{}", &oid.to_string()[..12])?;
         if variants {
             if id_revs.len() > 1 {
-                print!(" {}", RGB(100, 100, 100).paint(&diff_id[..8]));
+                write!(w, " {}", RGB(100, 100, 100).paint(&diff_id[..8]))?;
             } else {
-                print!(" {}", "        ");
+                write!(w, " {}", "        ")?;
             }
         }
-        print!(" {}", White.bold().paint(msg));
+        write!(w, " {}", White.bold().paint(msg))?;
 
-        println!();
+        writeln!(w)?;
 
         if !variants {
             break;
         }
     }
+
+    return Ok(());
 }
 
 struct Printer<'a> {
@@ -156,10 +160,11 @@ struct Printer<'a> {
 }
 
 impl<'a> Printer<'a> {
-    fn print_commits(&self) {
+    fn print_commits(&self, w: &mut impl Write) -> std::io::Result<()> {
         if self.args.reverse {
             for (idx, (timestamp, msg, id_revs)) in self.v.iter().rev().enumerate() {
                 print_commit(
+                    w,
                     idx,
                     &self.repo,
                     &timestamp,
@@ -170,11 +175,12 @@ impl<'a> Printer<'a> {
                     &self.branches,
                     &self.colors,
                     self.args.variants,
-                );
+                )?;
             }
         } else {
             for (idx, (timestamp, msg, id_revs)) in self.v.iter().enumerate() {
                 print_commit(
+                    w,
                     idx,
                     &self.repo,
                     &timestamp,
@@ -185,57 +191,65 @@ impl<'a> Printer<'a> {
                     &self.branches,
                     &self.colors,
                     self.args.variants,
-                );
+                )?;
             }
         }
+
+        return Ok(());
     }
 
-    fn print_branches(&self) {
+    fn print_branches(&self, w: &mut impl Write) -> std::io::Result<()>  {
         if self.args.reverse {
             for (i, name) in self.branches.iter().enumerate() {
-                self.print_branch(i, &*name);
+                self.print_branch(w, i, &*name)?;
             }
         } else {
             for (i, name) in self.branches.iter().enumerate().rev() {
-                self.print_branch(i, &*name);
+                self.print_branch(w, i, &*name)?;
             }
         }
+
+        Ok(())
     }
 
-    fn print_branch(&self, i: usize, name: &str) {
+    fn print_branch(&self, w: &mut impl Write, i: usize, name: &str) -> std::io::Result<()>  {
         let prefix = " ".repeat(22);
 
-        print!("{}", prefix);
+        write!(w, "{}", prefix)?;
         for c in 0..i {
-            print!("{}", self.colors[c % self.colors.len()].paint(format!("│")));
+            write!(w, "{}", self.colors[c % self.colors.len()].paint(format!("│")))?;
         }
-        println!(
+        writeln!(w,
             "{}",
             self.colors[i % self.colors.len()].paint(format!("{}", name))
-        );
+        )?;
+
+        Ok(())
     }
 
-    fn print_sep(&self) {
+    fn print_sep(&self, w: &mut impl Write) -> std::io::Result<()> {
         let prefix = " ".repeat(22);
 
-        print!("{}", prefix);
+        write!(w, "{}", prefix)?;
 
         for c in 0..self.branches.len() {
-            print!("{}", self.colors[c % self.colors.len()].paint(format!("│")));
+            write!(w, "{}", self.colors[c % self.colors.len()].paint(format!("│")))?;
         }
 
-        println!("");
+        writeln!(w, "")?;
+
+        Ok(())
     }
 
-    fn print(&self) -> Result<(), Error> {
+    fn print(&self, w: &mut impl Write) -> Result<(), Error> {
         if self.args.reverse {
-            self.print_branches();
-            self.print_sep();
-            self.print_commits();
+            self.print_branches(w)?;
+            self.print_sep(w)?;
+            self.print_commits(w)?;
         } else {
-            self.print_commits();
-            self.print_sep();
-            self.print_branches();
+            self.print_commits(w)?;
+            self.print_sep(w)?;
+            self.print_branches(w)?;
         }
 
         Ok(())
@@ -492,15 +506,16 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    Printer {
+    let printer = Printer {
         args,
         repo,
         colors,
         branches,
         oid_to_diff_id,
         v,
-    }
-    .print()?;
+    };
+
+    printer.print(&mut std::io::stdout())?;
 
     Ok(())
 }
