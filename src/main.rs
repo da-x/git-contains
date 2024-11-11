@@ -312,15 +312,12 @@ impl<'a> Printer<'a> {
     async fn event_loop<'b, 'c: 'b + 'a>(&'c mut self, stdout: &'b mut std::io::Stdout, renderer: &'b mut Renderer) -> Result<(), Error> {
         let mut reader = crossterm::event::EventStream::new();
 
-        let mut interactive_mode = InteractiveMode{
+        let mut interactive_mode = InteractiveMode {
             stdout,
             renderer,
             leave: false,
             main: self,
-            selected_item: 0,
-            view_offset: 0,
-            view_size: 0,
-            nr_items: 0,
+            commit_list: Default::default(),
         };
 
         interactive_mode.redraw()?;
@@ -349,53 +346,37 @@ impl<'a> Printer<'a> {
     }
 }
 
-struct InteractiveMode<'a, 'b: 'a> {
-    stdout: &'a mut std::io::Stdout,
-    renderer: &'a mut Renderer,
-    leave: bool,
-    main: &'b mut Printer<'b>,
+#[derive(Default)]
+struct ListView {
     selected_item: usize,
     view_offset: usize,
     nr_items: usize,
     view_size: usize,
 }
 
-impl<'a, 'b: 'a> InteractiveMode<'a, 'b> {
-    fn on_event(&mut self, event: crossterm::event::Event) -> Result<(), Error> {
-        match event {
-            crossterm::event::Event::Key(event) => {
-                let action = self.main.main_mode_map.get_action(event).map(|x| x.clone());
-                if let Some(action) = action {
-                    match action {
-                        MainAction::Quit => {
-                            self.leave = true;
-                        }
-                        MainAction::ItemDown => {
-                            self.selected_item += 1;
-                        },
-                        MainAction::ItemUp => {
-                            self.selected_item = self.selected_item.saturating_sub(1);
-                        },
-                        MainAction::ItemPageDown => {
-                            self.selected_item += self.view_size - 1;
-                        },
-                        MainAction::ItemPageUp => {
-                            if self.view_size > 0 {
-                                self.selected_item = self.selected_item.saturating_sub(self.view_size - 1);
-                            }
-                        },
-                        MainAction::FirstItem => {
-                            self.selected_item = 0;
-                        },
-                        MainAction::LastItem => {
-                            self.selected_item = self.nr_items - 1;
-                        },
-                    }
+impl ListView {
+    fn do_action(&mut self, action: ListViewAction) {
+        match action {
+            ListViewAction::Down => {
+                self.selected_item += 1;
+            },
+            ListViewAction::Up => {
+                self.selected_item = self.selected_item.saturating_sub(1);
+            },
+            ListViewAction::PageDown => {
+                self.selected_item += self.view_size - 1;
+            },
+            ListViewAction::PageUp => {
+                if self.view_size > 0 {
+                    self.selected_item = self.selected_item.saturating_sub(self.view_size - 1);
                 }
-            }
-            _ => {
-
-            }
+            },
+            ListViewAction::First => {
+                self.selected_item = 0;
+            },
+            ListViewAction::Last => {
+                self.selected_item = self.nr_items - 1;
+            },
         }
 
         if self.nr_items > 0 && self.selected_item >= self.nr_items {
@@ -406,6 +387,67 @@ impl<'a, 'b: 'a> InteractiveMode<'a, 'b> {
         }
         if self.selected_item < self.view_offset {
             self.view_offset = self.selected_item;
+        }
+    }
+}
+
+enum ListViewAction {
+    Down,
+    Up,
+    PageDown,
+    PageUp,
+    First,
+    Last
+}
+
+struct InteractiveMode<'a, 'b: 'a> {
+    stdout: &'a mut std::io::Stdout,
+    renderer: &'a mut Renderer,
+    leave: bool,
+    main: &'b mut Printer<'b>,
+    commit_list: ListView,
+}
+
+impl<'a, 'b: 'a> InteractiveMode<'a, 'b> {
+    fn on_event(&mut self, event: crossterm::event::Event) -> Result<(), Error> {
+        let mut list_action = None;
+
+        match event {
+            crossterm::event::Event::Key(event) => {
+                let action = self.main.main_mode_map.get_action(event).map(|x| x.clone());
+                if let Some(action) = action {
+                    match action {
+                        MainAction::Quit => {
+                            self.leave = true;
+                        }
+                        MainAction::ItemDown => {
+                            list_action = Some(ListViewAction::Down);
+                        },
+                        MainAction::ItemUp => {
+                            list_action = Some(ListViewAction::Up);
+                        },
+                        MainAction::ItemPageDown => {
+                            list_action = Some(ListViewAction::PageDown);
+                        },
+                        MainAction::ItemPageUp => {
+                            list_action = Some(ListViewAction::PageUp);
+                        },
+                        MainAction::FirstItem => {
+                            list_action = Some(ListViewAction::First);
+                        },
+                        MainAction::LastItem => {
+                            list_action = Some(ListViewAction::Last);
+                        },
+                    }
+                }
+            }
+            _ => {
+
+            }
+        }
+
+        if let Some(list_action) = list_action {
+            self.commit_list.do_action(list_action);
         }
 
         Ok(())
@@ -447,20 +489,22 @@ impl<'a, 'b: 'a> InteractiveMode<'a, 'b> {
             .with(masof::Color::Rgb { r: 255, g: 255, b: 255 });
 
         let max_commits_view = branches_y;
-        self.view_size = max_commits_view;
-        self.nr_items = self.main.commits.len();
+
+        let commits = &mut self.commit_list;
+        commits.view_size = max_commits_view;
+        commits.nr_items = self.main.commits.len();
         for (idx, line) in string.lines().enumerate() {
 
-            if idx < self.view_offset {
+            if idx < commits.view_offset {
                 continue;
             }
-            if idx >= self.view_offset + self.view_size {
+            if idx >= commits.view_offset + commits.view_size {
                 break;
             }
 
-            let y = idx - self.view_offset;
+            let y = idx - commits.view_offset;
             self.renderer.draw_raw_ansi(0, y as u16, line, cs);
-            if idx == self.selected_item {
+            if idx == commits.selected_item {
                 self.renderer.with_cell(0, y as u16, self.renderer.width(), |_, cs| {
                     *cs = cs.on(masof::Color::Rgb{r: 0, g: 70, b: 120});
                 })
