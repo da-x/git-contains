@@ -5,6 +5,7 @@ use git2::{Oid, Repository, Signature, Time};
 use globset::GlobMatcher;
 use lazy_static::lazy_static;
 use masof::{KeyCode, KeyMap, Renderer, Stylize};
+use regex::Regex;
 use std::collections::{btree_map, BTreeMap, HashMap};
 use std::collections::HashSet;
 use std::io::{BufWriter, Write};
@@ -58,6 +59,10 @@ struct Args {
     /// Branches to show, or `<refscript>:<param>` triggers
     branches: Vec<String>,
 
+    #[structopt(name = "suffix-collapse", long)]
+    /// Collapse similarly named branches according to Regex suffix
+    suffix_collapse: Option<String>,
+
     /// Only show commits having this text in commit message
     #[structopt(name = "search", long)]
     search: Option<String>,
@@ -109,6 +114,7 @@ fn print_commit(
     branches: &Vec<Rc<String>>,
     colors: &Vec<Colour>,
     variants: bool,
+    output_matching: &mut HashMap<usize, HashSet<Rc<String>>>,
 ) -> std::io::Result<()> {
     match highlight {
         Some(highlight) if !msg.contains(highlight) => {
@@ -122,22 +128,29 @@ fn print_commit(
         contained_in = contained_in.union(c_revs).cloned().collect();
     }
 
+    let mut matchings = HashSet::new();
     for (oid, c_revs) in id_revs {
         print_time(w, &time, idx)?;
 
         let diff_id = oid_to_diff_id.get(oid).map(|x| x.as_str()).unwrap_or("");
 
-        for (i, item) in branches.iter().enumerate() {
+        for (branch_idx, item) in branches.iter().enumerate() {
             let revs = if variants {
                 c_revs
             } else {
                 &contained_in
             };
 
-            if revs.contains(item) {
-                write!(w, "{}", colors[i % colors.len()].paint(format!("x")))?;
+            let m = if revs.contains(item) {
+                write!(w, "{}", colors[branch_idx % colors.len()].paint(format!("x")))?;
+                true
             } else {
-                write!(w, "{}", colors[i % colors.len()].paint(format!("┊")))?;
+                write!(w, "{}", colors[branch_idx % colors.len()].paint(format!("┊")))?;
+                false
+            };
+
+            if m {
+                matchings.insert(item.clone());
             }
         }
 
@@ -158,6 +171,8 @@ fn print_commit(
             break;
         }
     }
+
+    output_matching.insert(idx, matchings);
 
     return Ok(());
 }
@@ -181,10 +196,12 @@ struct Printer<'a> {
     oid_to_diff_id: HashMap<&'a Oid, String>,
     main_mode_map: KeyMap<MainAction>,
     commits: Vec<(Time, String, Vec<(&'a Oid, &'a HashSet<Rc<String>>)>)>,
+    suffix_collapse: Option<Regex>,
 }
 
 impl<'a> Printer<'a> {
-    fn print_commits(&self, w: &mut impl Write) -> std::io::Result<()> {
+    fn print_commits(&self, w: &mut impl Write) -> std::io::Result<HashMap<usize, HashSet<Rc<String>>>> {
+        let mut map = HashMap::new();
         if self.args.reverse {
             for (idx, (timestamp, msg, id_revs)) in self.commits.iter().rev().enumerate() {
                 print_commit(
@@ -199,6 +216,7 @@ impl<'a> Printer<'a> {
                     &self.branches,
                     &self.colors,
                     self.args.variants,
+                    &mut map,
                 )?;
             }
         } else {
@@ -215,25 +233,25 @@ impl<'a> Printer<'a> {
                     &self.branches,
                     &self.colors,
                     self.args.variants,
+                    &mut map,
                 )?;
             }
         }
 
-        return Ok(());
+        return Ok(map);
     }
 
-    fn print_branches(&self, w: &mut impl Write) -> std::io::Result<Vec<Rc<String>>>  {
+    fn print_branches(&self, w: &mut impl Write) -> std::io::Result<Vec<HashSet<Rc<String>>>>  {
         let mut display_order = vec![];
-        if self.args.reverse {
-            for (i, name) in self.branches.iter().enumerate() {
-                self.print_branch(w, i, &*name)?;
-                display_order.push(name.clone());
-            }
+        let branches: Vec<_> = if self.args.reverse {
+            self.branches.iter().enumerate().collect()
         } else {
-            for (i, name) in self.branches.iter().enumerate().rev() {
-                self.print_branch(w, i, &*name)?;
-                display_order.push(name.clone());
-            }
+            self.branches.iter().enumerate().rev().collect()
+        };
+
+        for (i, name) in branches.iter() {
+            self.print_branch(w, *i, &*name)?;
+            display_order.push(vec![(*name).clone()].into_iter().map(|x| x.clone()).collect());
         }
 
         Ok(display_order)
@@ -456,10 +474,18 @@ impl<'a, 'b: 'a> InteractiveMode<'a, 'b> {
     fn redraw(&mut self) -> Result<(), Error> {
         self.renderer.begin()?;
 
-        let mut buf = BufWriter::new(Vec::new());
-        self.main.print_sep(&mut buf)?;
-        let display_branches = self.main.print_branches(&mut buf)?;
-        let bytes = buf.into_inner().unwrap();
+        let mut buf_branches = BufWriter::new(Vec::new());
+        self.main.print_sep(&mut buf_branches)?;
+        let mut buf_commmits = BufWriter::new(Vec::new());
+        let matchings = self.main.print_commits(&mut buf_commmits)?;
+        let mut branch_highlights = HashSet::new();
+        if let Some(x) = matchings.get(&self.commit_list.selected_item) {
+            branch_highlights = x.clone();
+        }
+        let branch_highlights = branch_highlights;
+        let display_branches = self.main.print_branches(&mut buf_branches)?;
+
+        let bytes = buf_branches.into_inner().unwrap();
         let string = String::from_utf8(bytes).unwrap();
         let cs = masof::ContentStyle::new()
             .with(masof::Color::Rgb { r: 255, g: 255, b: 255 });
@@ -473,17 +499,26 @@ impl<'a, 'b: 'a> InteractiveMode<'a, 'b> {
 
             let y = branches_y + idx;
             self.renderer.draw_raw_ansi(0, y as u16, line, cs);
-            // if idx == self.selected_item {
-            //     self.renderer.with_cell(0, y as u16, self.renderer.width(), |_, cs| {
-            //         *cs = cs.on(masof::Color::Rgb{r: 0, g: 70, b: 120});
-            //     })
-            // }
+
+            if idx < display_branches.len() {
+                let s = &display_branches[idx];
+                let mut contained = false;
+                for item in branch_highlights.iter() {
+                    if s.contains(item) {
+                        contained = true;
+                        break;
+                    }
+                }
+                if contained {
+                    self.renderer.with_cell(0, y as u16, self.renderer.width(), |_, cs| {
+                        *cs = cs.on(masof::Color::Rgb{r: 50, g: 50, b: 50});
+                    })
+                }
+            }
         }
 
 
-        let mut buf = BufWriter::new(Vec::new());
-        self.main.print_commits(&mut buf)?;
-        let bytes = buf.into_inner().unwrap();
+        let bytes = buf_commmits.into_inner().unwrap();
         let string = String::from_utf8(bytes).unwrap();
         let cs = masof::ContentStyle::new()
             .with(masof::Color::Rgb { r: 255, g: 255, b: 255 });
@@ -575,6 +610,12 @@ fn main() -> anyhow::Result<()> {
         static ref RE_BRANCH: regex::Regex =
             regex::Regex::new("^refs/remotes/origin/(.+)$").unwrap();
     }
+
+    let suffix_collapse = if let Some(suffix_collapse) = &args.suffix_collapse {
+        Some(regex::Regex::new(&suffix_collapse)?)
+    } else {
+        None
+    };
 
     // Which commits OIDs in which branches
     let mut mapoid_to_branches = BTreeMap::new();
@@ -775,6 +816,7 @@ fn main() -> anyhow::Result<()> {
         oid_to_diff_id,
         main_mode_map: KeyMap::new(),
         commits: v,
+        suffix_collapse,
     };
 
     printer.run()?;
