@@ -15,9 +15,10 @@ use structopt::StructOpt;
 use futures::FutureExt;
 use futures::StreamExt;
 
-use ansi_term::Colour;
+use ansi_term::{Colour, Style};
 use ansi_term::Colour::{White, RGB};
 use thiserror::Error;
+use itertools::Itertools;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -241,7 +242,7 @@ impl<'a> Printer<'a> {
         return Ok(map);
     }
 
-    fn print_branches(&self, w: &mut impl Write) -> std::io::Result<Vec<HashSet<Rc<String>>>>  {
+    fn print_branches(&self, w: &mut impl Write, highlights: &HashSet<Rc<String>>) -> std::io::Result<Vec<HashSet<Rc<String>>>>  {
         let mut display_order = vec![];
         let branches: Vec<_> = if self.args.reverse {
             self.branches.iter().enumerate().collect()
@@ -249,25 +250,115 @@ impl<'a> Printer<'a> {
             self.branches.iter().enumerate().rev().collect()
         };
 
-        for (i, name) in branches.iter() {
-            self.print_branch(w, *i, &*name)?;
-            display_order.push(vec![(*name).clone()].into_iter().map(|x| x.clone()).collect());
+        if let Some(suffix_collapse) = &self.suffix_collapse {
+            for (_, group) in &branches.into_iter().chunk_by(|(_, name)| {
+                suffix_collapse.find(name).is_some()
+                }
+            ) {
+                let mut names = vec![];
+                let group = group.collect::<Vec<_>>();
+                let mut last = 0;
+                for (idx, name) in group.iter() {
+                    if self.args.reverse {
+                        names.push((*name).clone());
+                    } else {
+                        names.insert(0, (*name).clone());
+                        last = *idx;
+                    }
+                }
+                self.print_branch_collapsed(w, last, &names, suffix_collapse, &highlights)?;
+                display_order.push(names.into_iter().collect());
+            }
+        } else {
+            for (i, name) in branches.iter() {
+                self.print_branch(w, *i, name, &highlights)?;
+                display_order.push(vec![(*name).clone()].into_iter().map(|x| x.clone()).collect());
+            }
         }
+
 
         Ok(display_order)
     }
 
-    fn print_branch(&self, w: &mut impl Write, i: usize, name: &str) -> std::io::Result<()>  {
+    fn print_branch(&self, w: &mut impl Write, i: usize, name: &Rc<String>, highlights: &HashSet<Rc<String>>) -> std::io::Result<()>  {
         let prefix = " ".repeat(22);
 
         write!(w, "{}", prefix)?;
         for c in 0..i {
             write!(w, "{}", self.colors[c % self.colors.len()].paint(format!("│")))?;
         }
-        writeln!(w,
-            "{}",
-            self.colors[i % self.colors.len()].paint(format!("{}", name))
-        )?;
+
+        let style = self.colors[i % self.colors.len()];
+        if highlights.contains(name) {
+            writeln!(w, "{}", style.on(Colour::RGB(50, 50, 50)).paint(format!("{}", name)))?
+        } else {
+            writeln!(w, "{}", style.paint(format!("{}", name)))?
+        }
+
+        Ok(())
+    }
+
+    fn print_branch_collapsed(&self, w: &mut impl Write, i: usize,
+        names: &Vec<Rc<String>>, _regex: &Regex, highlights: &HashSet<Rc<String>>) -> std::io::Result<()>  {
+        let prefix = " ".repeat(22);
+
+        write!(w, "{}", prefix)?;
+        for c in 0..i {
+            let style = self.colors[c % self.colors.len()];
+            write!(w, "{}", style.paint(format!("│")))?;
+        }
+
+        let mut try_suffix: usize = 0;
+        for i in 1.. {
+            let mut prefix: Option<String> = None;
+            let mut good = true;
+            for name in names.iter() {
+                if let Some(first) = &prefix {
+                    if first.len() <= name.len() {
+                        if &name[..first.len()] == first {
+                            continue;
+                        }
+                        good = false;
+                        break;
+                    }
+                } else {
+                    if i > name.len() {
+                        good = false;
+                        break;
+                    }
+                    let mut x = (&**name).to_owned();
+                    let _ = x.split_off(i);
+                    prefix = Some(x);
+                }
+            }
+            if good {
+                try_suffix = i;
+            } else {
+                break;
+            }
+        }
+
+        for (idx, name) in names.iter().enumerate() {
+            if idx != 0 {
+                write!(w, " ")?;
+            }
+            let style = self.colors[(i + idx) % self.colors.len()];
+
+            let orig_name = name;
+            let name = if idx == 0 || try_suffix == 0{
+                (&**name).to_owned()
+            } else {
+                format!("…{}", &name[try_suffix..])
+            };
+
+            if highlights.contains(orig_name) {
+                write!(w, "{}", Style::new().on(Colour::RGB(50, 50, 50)).paint(
+                        format!("{}", style.paint(format!("{}", name)))))?
+            } else {
+                write!(w, "{}", style.paint(format!("{}", name)))?
+            }
+        }
+        writeln!(w, "")?;
 
         Ok(())
     }
@@ -295,13 +386,13 @@ impl<'a> Printer<'a> {
 
         let w = &mut std::io::stdout();
         if self.args.reverse {
-            self.print_branches(w)?;
+            self.print_branches(w, &HashSet::new())?;
             self.print_sep(w)?;
             self.print_commits(w)?;
         } else {
             self.print_commits(w)?;
             self.print_sep(w)?;
-            self.print_branches(w)?;
+            self.print_branches(w, &HashSet::new())?;
         }
 
         Ok(())
@@ -483,7 +574,7 @@ impl<'a, 'b: 'a> InteractiveMode<'a, 'b> {
             branch_highlights = x.clone();
         }
         let branch_highlights = branch_highlights;
-        let display_branches = self.main.print_branches(&mut buf_branches)?;
+        let display_branches = self.main.print_branches(&mut buf_branches, &branch_highlights)?;
 
         let bytes = buf_branches.into_inner().unwrap();
         let string = String::from_utf8(bytes).unwrap();
@@ -499,24 +590,7 @@ impl<'a, 'b: 'a> InteractiveMode<'a, 'b> {
 
             let y = branches_y + idx;
             self.renderer.draw_raw_ansi(0, y as u16, line, cs);
-
-            if idx < display_branches.len() {
-                let s = &display_branches[idx];
-                let mut contained = false;
-                for item in branch_highlights.iter() {
-                    if s.contains(item) {
-                        contained = true;
-                        break;
-                    }
-                }
-                if contained {
-                    self.renderer.with_cell(0, y as u16, self.renderer.width(), |_, cs| {
-                        *cs = cs.on(masof::Color::Rgb{r: 50, g: 50, b: 50});
-                    })
-                }
-            }
         }
-
 
         let bytes = buf_commmits.into_inner().unwrap();
         let string = String::from_utf8(bytes).unwrap();

@@ -18,3 +18,4 @@ crossterm = { version = "0.25", features = ["event-stream"] }
 tokio = {version = "1", features = ["rt", "process", "io-util"]}
 anyhow = "*"
 futures = "0.3"
+itertools = "0.13.0"
